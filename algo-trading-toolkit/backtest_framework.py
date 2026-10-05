@@ -254,12 +254,22 @@ class BacktestEngine:
                 continue
             # Resample to configured timeframe
             df_resampled = DataPipeline.resample_to_timeframe(df, self.config.timeframe)
+            # Alpaca timestamps are tz-aware UTC but the simulation clock below is
+            # naive, so `sim_time in df.index` never matched (zero trades) and
+            # `df.index <= sim_time` raised TypeError. Normalise to naive UTC.
+            if df_resampled.index.tz is not None:
+                df_resampled.index = df_resampled.index.tz_convert("UTC").tz_localize(None)
             all_data[asset] = df_resampled
 
         # 2. Get the union of all timestamps (minute-by-minute simulation)
         # We will iterate over each minute from start to end.
+        # Config dates are UTC; keep them naive to match the bar index.
         start_dt = pd.to_datetime(self.config.start_date)
         end_dt = pd.to_datetime(self.config.end_date)
+        if start_dt.tzinfo is not None:
+            start_dt = start_dt.tz_convert("UTC").tz_localize(None)
+        if end_dt.tzinfo is not None:
+            end_dt = end_dt.tz_convert("UTC").tz_localize(None)
         current_time = start_dt
 
         # Pre-compute signals for each asset at each timestamp?
@@ -303,9 +313,11 @@ class BacktestEngine:
                         # We will implement a placeholder signal generator.
                         signal, trend = self._get_signal(asset, row, sim_time)
                         self.signal_cache[asset] = signal
-                        # Check if we should buy
+                        # Check if we should buy. Skip assets already held: positions
+                        # is keyed by asset, so re-buying overwrote the old position
+                        # while deducting a second full notional from cash.
                         pos_count = len(self.positions)
-                        if self.strategy.should_buy(asset, signal, row['close'], trend, pos_count):
+                        if asset not in self.positions and self.strategy.should_buy(asset, signal, row['close'], trend, pos_count):
                             self._open_position(asset, row['close'], sim_time, signal)
                     else:
                         # If no bar at this exact time, use the latest available
